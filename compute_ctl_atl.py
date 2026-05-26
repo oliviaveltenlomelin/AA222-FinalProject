@@ -1,3 +1,40 @@
+"""
+compute_ctl_atl.py
+------------------
+Extracts Chronic Training Load (CTL) and Acute Training Load (ATL)
+from a Strava activities CSV export, then produces a cleaned dataset
+ready to feed into the GP surrogate (gp_surrogate.py).
+
+What CTL and ATL are
+--------------------
+Both are exponentially weighted moving averages of daily training load
+(TRIMP — Training Impulse).  The only difference is the time constant:
+
+    CTL  (τ = 42 days)  — "fitness":  slow-moving, reflects long-term
+                          aerobic adaptation.  A four-mile run at CTL=60
+                          feels easier than at CTL=20.
+
+    ATL  (τ = 7 days)   — "fatigue":  fast-moving, reflects recent
+                          accumulated stress.  High ATL → you're tired.
+
+At each day d:
+    CTL_d = CTL_{d-1} + (TRIMP_d - CTL_{d-1}) * (1 - exp(-1/42))
+    ATL_d = ATL_{d-1} + (TRIMP_d - ATL_{d-1}) * (1 - exp(-1/7))
+
+On rest days TRIMP_d = 0, so both decay toward zero automatically.
+
+TRIMP source (in priority order)
+---------------------------------
+1. Strava "Relative Effort"  — HR-zone-weighted load, Strava's own TRIMP.
+2. (Moving time in min) × (avg HR / 100)  — simple Banister TRIMP proxy.
+3. Distance in km  — last resort when HR is unavailable.
+
+Output columns (gp_ready_runs.csv)
+-----------------------------------
+date, distance_km, pace_min_per_km, elevation_gain_m,
+avg_hr, max_hr, trimp, CTL, ATL
+"""
+
 import numpy as np
 import pandas as pd
 
@@ -29,7 +66,12 @@ def load_runs(path: str) -> pd.DataFrame:
         runs["Activity Date"], format="%b %d, %Y, %I:%M:%S %p"
     )
     runs = runs.sort_values("date").reset_index(drop=True)
-    print(f"Loaded {len(runs)} run activities  "
+
+    # Keep only runs that have heart rate — drops pre-2020 data where HR
+    # was unavailable, so CTL/ATL are built entirely on clean TRIMP values
+    before = len(runs)
+    runs = runs[runs["Average Heart Rate"].notna()].reset_index(drop=True)
+    print(f"Loaded {before} run activities, kept {len(runs)} with HR data  "
           f"({runs['date'].min().date()} → {runs['date'].max().date()})")
     return runs
 
