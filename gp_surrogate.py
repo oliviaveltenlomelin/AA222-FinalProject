@@ -252,29 +252,12 @@ def plot_gp_slices(gpr, X_train_orig, y_train_orig,
 # ==============================================================================
 #  FEASIBILITY CHECK  — call this inside your DP action loop
 # ==============================================================================
-
+# Self explanatory
 def check_trimp_feasibility(gpr, action: np.ndarray,
                              x_scaler: StandardScaler,
                              y_scaler: StandardScaler,
                              trimp_max: float = TRIMP_MAX,
                              confidence: float = 1.96) -> tuple[bool, float, float]:
-    """
-    Check whether a candidate run action is feasible under the TRIMP constraint.
-
-    Uses a chance constraint: reject if the upper confidence bound on
-    predicted TRIMP exceeds trimp_max.
-
-    Parameters
-    ----------
-    action    : [distance_km, pace_min_per_km, elevation_gain_m]
-    trimp_max : max allowable Relative Effort per run (tune to athlete)
-
-    Returns
-    -------
-    feasible : True if predicted TRIMP UCB < trimp_max
-    mu       : predicted mean TRIMP
-    std      : predicted std TRIMP
-    """
     x = np.array(action).reshape(1, -1)
     mu, std = gp_predict(gpr, x, x_scaler, y_scaler)
     mu, std = float(mu[0]), float(std[0])
@@ -294,9 +277,9 @@ if __name__ == "__main__":
     print(f"  X shape  : {X.shape}")
 
     # 2. Train / test split
-    rng   = np.random.default_rng(seed=42)
-    idx   = rng.permutation(len(y))
-    split = int(0.8 * len(y))
+    rng   = np.random.default_rng(seed=42)  # seed=42 means that the shuffling is the same every time - i.e. we can rerun this and the same results will be produced
+    idx   = rng.permutation(len(y))         # Shuffing our data points so that it does just train/test on the same set every time
+    split = int(0.8 * len(y))               # Splits 80/20, training/testing
     X_train, X_test = X[idx[:split]], X[idx[split:]]
     y_train, y_test = y[idx[:split]], y[idx[split:]]
 
@@ -345,12 +328,3 @@ if __name__ == "__main__":
                    feature_names=FEATURE_NAMES,
                    target_name="Relative Effort (TRIMP)",
                    save_path="gp_slices_trimp.png")
-
-    # 6. Example DP usage
-    # At each DP step, call with the candidate action:
-    #
-    # action = [distance_km, pace_min_per_km, elevation_gain_m]
-    # ok, mu_trimp, std_trimp = check_trimp_feasibility(gpr, action, x_scaler, y_scaler)
-    # if ok:
-    #     new_ctl = ctl + (mu_trimp - ctl) * K_CTL
-    #     new_atl = atl + (mu_trimp - atl) * K_ATL
