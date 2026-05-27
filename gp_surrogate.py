@@ -1,10 +1,12 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import joblib
 
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel, Matern, WhiteKernel
 from sklearn.preprocessing import StandardScaler
+
 
 
 # ==============================================================================
@@ -265,66 +267,104 @@ def check_trimp_feasibility(gpr, action: np.ndarray,
     return feasible, mu, std
 
 
+# ----------- CALL FUNCTION -----------
+
+def train_surrogate(model_path: str = "gpr_surrogate.pkl"):
+    """
+    Fits the GP surrogate and returns everything the DP needs.
+    Saves the fitted model to disk so subsequent calls load instantly.
+
+    Returns
+    -------
+    gpr      : fitted GaussianProcessRegressor
+    x_scaler : fitted StandardScaler for X
+    y_scaler : fitted StandardScaler for y
+    """
+    import os
+    if os.path.exists(model_path):
+        print(f"Loading cached surrogate from '{model_path}' ...")
+        return joblib.load(model_path)
+
+    X, y = load_data(CSV_PATH)
+
+    rng   = np.random.default_rng(seed=42)
+    idx   = rng.permutation(len(y))
+    split = int(0.8 * len(y))
+    X_train, X_test = X[idx[:split]], X[idx[split:]]
+    y_train, y_test = y[idx[:split]], y[idx[split:]]
+
+    gpr, x_scaler, y_scaler = build_gp_surrogate(
+        X_train, y_train, label="Relative Effort",
+        n_restarts=N_RESTARTS, length_scale_0=LENGTH_SCALE_0,
+        length_scale_bounds=LENGTH_SCALE_BOUNDS, noise_level=NOISE_LEVEL,
+        use_constant_mean=USE_CONSTANT_MEAN,
+    )
+
+    joblib.dump((gpr, x_scaler, y_scaler), model_path)
+    print(f"  Saved surrogate to '{model_path}'")
+    return gpr, x_scaler, y_scaler
+
+
 # ==============================================================================
 #  MAIN
 # ==============================================================================
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
 
-    # 1. Load data
-    X, y = load_data(CSV_PATH)
-    print(f"  Features : {FEATURE_COLS}")
-    print(f"  X shape  : {X.shape}")
+#     # 1. Load data
+#     X, y = load_data(CSV_PATH)
+#     print(f"  Features : {FEATURE_COLS}")
+#     print(f"  X shape  : {X.shape}")
 
-    # 2. Train / test split
-    rng   = np.random.default_rng(seed=42)  # seed=42 means that the shuffling is the same every time - i.e. we can rerun this and the same results will be produced
-    idx   = rng.permutation(len(y))         # Shuffing our data points so that it does just train/test on the same set every time
-    split = int(0.8 * len(y))               # Splits 80/20, training/testing
-    X_train, X_test = X[idx[:split]], X[idx[split:]]
-    y_train, y_test = y[idx[:split]], y[idx[split:]]
+#     # 2. Train / test split
+#     rng   = np.random.default_rng(seed=42)  # seed=42 means that the shuffling is the same every time - i.e. we can rerun this and the same results will be produced
+#     idx   = rng.permutation(len(y))         # Shuffing our data points so that it does just train/test on the same set every time
+#     split = int(0.8 * len(y))               # Splits 80/20, training/testing
+#     X_train, X_test = X[idx[:split]], X[idx[split:]]
+#     y_train, y_test = y[idx[:split]], y[idx[split:]]
 
-    # 3. Fit surrogate
-    gpr, x_scaler, y_scaler = build_gp_surrogate(
-        X_train, y_train, label="Relative Effort",
-        n_restarts          = N_RESTARTS,
-        length_scale_0      = LENGTH_SCALE_0,
-        length_scale_bounds = LENGTH_SCALE_BOUNDS,
-        noise_level         = NOISE_LEVEL,
-        use_constant_mean   = USE_CONSTANT_MEAN,
-    )
+#     # 3. Fit surrogate
+#     gpr, x_scaler, y_scaler = build_gp_surrogate(
+#         X_train, y_train, label="Relative Effort",
+#         n_restarts          = N_RESTARTS,
+#         length_scale_0      = LENGTH_SCALE_0,
+#         length_scale_bounds = LENGTH_SCALE_BOUNDS,
+#         noise_level         = NOISE_LEVEL,
+#         use_constant_mean   = USE_CONSTANT_MEAN,
+#     )
 
-    # 4. RMSE on held-out test set
-    mu_test, std_test = gp_predict(gpr, X_test, x_scaler, y_scaler)
-    rmse = np.sqrt(np.mean((mu_test - y_test) ** 2))
-    print(f"\n  Test RMSE : {rmse:.2f} RE units")
-    print(f"  Mean σ    : {std_test.mean():.2f} RE units")
+#     # 4. RMSE on held-out test set
+#     mu_test, std_test = gp_predict(gpr, X_test, x_scaler, y_scaler)
+#     rmse = np.sqrt(np.mean((mu_test - y_test) ** 2))
+#     print(f"\n  Test RMSE : {rmse:.2f} RE units")
+#     print(f"  Mean σ    : {std_test.mean():.2f} RE units")
 
-    # 4b. Validation
-    print("\n--- Validation ---")
+#     # 4b. Validation
+#     print("\n--- Validation ---")
 
-    # Calibration
-    within_95 = np.mean(np.abs(mu_test - y_test) < 1.96 * std_test)
-    print(f"Calibration: {within_95:.1%} of test points within 95% CI")
+#     # Calibration
+#     within_95 = np.mean(np.abs(mu_test - y_test) < 1.96 * std_test)
+#     print(f"Calibration: {within_95:.1%} of test points within 95% CI")
 
-    # Directional sanity — TRIMP should rise with distance and elevation
-    mean_pace = X_train[:, 1].mean()
-    mean_elev = X_train[:, 2].mean()
-    mean_dist = X_train[:, 0].mean()
+#     # Directional sanity — TRIMP should rise with distance and elevation
+#     mean_pace = X_train[:, 1].mean()
+#     mean_elev = X_train[:, 2].mean()
+#     mean_dist = X_train[:, 0].mean()
 
-    _, short_re, _ = check_trimp_feasibility(gpr, [5.0,  mean_pace, mean_elev], x_scaler, y_scaler)
-    _, long_re,  _ = check_trimp_feasibility(gpr, [15.0, mean_pace, mean_elev], x_scaler, y_scaler)
-    _, flat_re,  _ = check_trimp_feasibility(gpr, [mean_dist, mean_pace, 0.0],   x_scaler, y_scaler)
-    _, hilly_re, _ = check_trimp_feasibility(gpr, [mean_dist, mean_pace, 200.0], x_scaler, y_scaler)
-    _, easy_re,  _ = check_trimp_feasibility(gpr, [mean_dist, 6.0, mean_elev],   x_scaler, y_scaler)
-    _, hard_re,  _ = check_trimp_feasibility(gpr, [mean_dist, 4.0, mean_elev],   x_scaler, y_scaler)
+#     _, short_re, _ = check_trimp_feasibility(gpr, [5.0,  mean_pace, mean_elev], x_scaler, y_scaler)
+#     _, long_re,  _ = check_trimp_feasibility(gpr, [15.0, mean_pace, mean_elev], x_scaler, y_scaler)
+#     _, flat_re,  _ = check_trimp_feasibility(gpr, [mean_dist, mean_pace, 0.0],   x_scaler, y_scaler)
+#     _, hilly_re, _ = check_trimp_feasibility(gpr, [mean_dist, mean_pace, 200.0], x_scaler, y_scaler)
+#     _, easy_re,  _ = check_trimp_feasibility(gpr, [mean_dist, 6.0, mean_elev],   x_scaler, y_scaler)
+#     _, hard_re,  _ = check_trimp_feasibility(gpr, [mean_dist, 4.0, mean_elev],   x_scaler, y_scaler)
 
-    print(f"Short (5km)  vs Long (15km)  @ mean pace+elev : {short_re:.1f} vs {long_re:.1f} RE  ({'✓' if long_re > short_re else '✗'})")
-    print(f"Flat (0m)    vs Hilly (200m) @ mean dist+pace : {flat_re:.1f} vs {hilly_re:.1f} RE  ({'✓' if hilly_re > flat_re else '✗'})")
-    print(f"Easy (6:00)  vs Hard (4:00)  @ mean dist+elev : {easy_re:.1f} vs {hard_re:.1f} RE  ({'✓' if hard_re > easy_re else '✗'})")
-    print("------------------\n")
+#     print(f"Short (5km)  vs Long (15km)  @ mean pace+elev : {short_re:.1f} vs {long_re:.1f} RE  ({'✓' if long_re > short_re else '✗'})")
+#     print(f"Flat (0m)    vs Hilly (200m) @ mean dist+pace : {flat_re:.1f} vs {hilly_re:.1f} RE  ({'✓' if hilly_re > flat_re else '✗'})")
+#     print(f"Easy (6:00)  vs Hard (4:00)  @ mean dist+elev : {easy_re:.1f} vs {hard_re:.1f} RE  ({'✓' if hard_re > easy_re else '✗'})")
+#     print("------------------\n")
 
-    # 5. Slice plots
-    plot_gp_slices(gpr, X_train, y_train, x_scaler, y_scaler,
-                   feature_names=FEATURE_NAMES,
-                   target_name="Relative Effort (TRIMP)",
-                   save_path="gp_slices_trimp.png")
+#     # 5. Slice plots
+#     plot_gp_slices(gpr, X_train, y_train, x_scaler, y_scaler,
+#                    feature_names=FEATURE_NAMES,
+#                    target_name="Relative Effort (TRIMP)",
+#                    save_path="gp_slices_trimp.png")
