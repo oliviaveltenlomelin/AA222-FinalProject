@@ -34,7 +34,7 @@ MAX_PACE_MIN_PER_KM = 10.0          # Pace sanity filter
 
 # Tune this to match your athlete's weekly load targets.
 # A typical easy run for this athlete is ~15-20 RE; a long run ~50-80.
-TRIMP_MAX = 80.0                    # DP constraint: maximum allowable predicted Relative Effort per run.
+TRIMP_MAX = 200.0                    # DP constraint: maximum allowable predicted Relative Effort per run.
 
 
 # ==============================================================================

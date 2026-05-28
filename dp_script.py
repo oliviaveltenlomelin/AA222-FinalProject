@@ -12,12 +12,12 @@ gpr, x_scaler, y_scaler = train_surrogate()
 # --- constants ---
 K_CTL = 1 - np.exp(-1 / 42)
 K_ATL = 1 - np.exp(-1 / 7)
-CTL_GOAL = 50
+CTL_GOAL = 80
 atl_max = 75
 T_max = 140
 
 # --- define grids ---
-ctl_grid = np.arange(10, 56, 2)
+ctl_grid = np.arange(10, 86, 1)
 atl_grid = np.arange(5, 76, 1)
 
 n_ctl = len(ctl_grid)
@@ -54,69 +54,6 @@ feasible_actions = [(action, trimp) for action, trimp in trimp_cache.items()]
 print(f"  {len(feasible_actions)} feasible actions out of {len(action_array)}")
 
 
-
-
-
-
-
-
-# --- diagnostic ---
-print("\n=== DIAGNOSTIC ===")
-
-# 1. TRIMP range
-trimps = [t for _, t in feasible_actions]
-print(f"Feasible action TRIMP range: min={min(trimps):.1f}, max={max(trimps):.1f}")
-
-# 2. Can we ever reach CTL_GOAL continuously?
-print(f"\nCTL_GOAL = {CTL_GOAL}")
-print(f"K_CTL = {K_CTL:.4f}")
-print(f"Max TRIMP = {max(trimps):.1f}")
-for ctl_test in [35, 40, 45, 48, 49]:
-    ctl_n = ctl_test + (max(trimps) - ctl_test) * K_CTL
-    print(f"  From CTL={ctl_test}, best run -> CTL_next={ctl_n:.3f}  {'✓ REACHES GOAL' if ctl_n >= CTL_GOAL else '✗'}")
-
-# 3. How many days of max effort to reach goal from current CTL?
-print(f"\nSimulating max effort every day from CTL=37:")
-ctl_sim = 37.0
-for day in range(1, 200):
-    ctl_sim = ctl_sim + (max(trimps) - ctl_sim) * K_CTL
-    if ctl_sim >= CTL_GOAL:
-        print(f"  Reaches CTL_GOAL={CTL_GOAL} on day {day}  (CTL={ctl_sim:.2f})")
-        break
-    if day % 20 == 0:
-        print(f"  Day {day}: CTL={ctl_sim:.2f}")
-else:
-    print(f"  Never reaches CTL_GOAL={CTL_GOAL} in 200 days. Final CTL={ctl_sim:.2f}")
-
-# 4. Check terminal states in V
-print(f"\nTerminal states in V (V==0): {np.sum(V==0)}")
-print(f"CTL grid values at terminal states: {ctl_grid[np.where(np.any(V==0, axis=1))[0]]}")
-
-# 5. Check first iteration manually for one state
-print(f"\nManual check — state CTL=48, ATL=20:")
-ctl_test, atl_test = 48.0, 20.0
-reachable_goal = []
-for action, mu_trimp in feasible_actions:
-    ctl_n = ctl_test + (mu_trimp - ctl_test) * K_CTL
-    atl_n = atl_test + (mu_trimp - atl_test) * K_ATL
-    if ctl_n >= CTL_GOAL:
-        reachable_goal.append((action, mu_trimp, ctl_n))
-print(f"  Actions that transition into goal: {len(reachable_goal)}")
-if reachable_goal:
-    for a, t, cn in reachable_goal[:3]:
-        print(f"    TRIMP={t:.1f} -> CTL_next={cn:.3f}")
-else:
-    print(f"  None — max reachable CTL_next = {max(ctl_test + (t - ctl_test)*K_CTL for _,t in feasible_actions):.3f}")
-
-print(f"Max distance in action space: {possible_distances_array.max()}")
-print(f"Max TRIMP with 20km cap: {max(trimps):.1f}")
-
-print("=== END DIAGNOSTIC ===\n")
-
-
-
-
-
 for iteration in range(T_max):
     V_prev = V.copy()
     for i, ctl in enumerate(ctl_grid):
@@ -143,6 +80,7 @@ for iteration in range(T_max):
             if cost < best_cost:
                 best_cost = cost
                 best_action = "rest"
+
 
             # --- run actions ---
             for action, mu_trimp in feasible_actions:
@@ -175,15 +113,14 @@ for iteration in range(T_max):
                 if cost < best_cost:
                     best_cost = cost
                     best_action = action
-            
+
             V[i, j] = best_cost
             policy[i, j] = best_action
 
     # check convergence
-    finite_mask = np.isfinite(V) & np.isfinite(V_prev)
-    changed = np.sum(V[finite_mask] != V_prev[finite_mask])
+    changed = np.sum(V != V_prev)
     print(f"Iteration {iteration+1}: {changed} states updated")
-    
+
     if changed == 0:
         print(f"Converged after {iteration+1} iterations!")
         break
