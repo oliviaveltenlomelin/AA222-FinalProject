@@ -12,36 +12,40 @@ gpr, x_scaler, y_scaler = train_surrogate()
 # --- constants ---
 K_CTL = 1 - np.exp(-1 / 42)
 K_ATL = 1 - np.exp(-1 / 7)
-CTL_GOAL = 80
+CTL_GOAL = 45
 atl_max = 75
 T_max = 140
+MAX_CONSEC_RUNS = 2   # force rest after this many consecutive run days
 
 # --- define grids ---
-ctl_grid = np.arange(10, 86, 1)
-atl_grid = np.arange(5, 76, 1)
+ctl_grid    = np.arange(10, 56, 1)   # up to CTL_GOAL + buffer
+atl_grid    = np.arange(5,  76, 1)
+consec_grid = np.arange(0, MAX_CONSEC_RUNS + 1)  # 0, 1, 2
 
-n_ctl = len(ctl_grid)
-n_atl = len(atl_grid)
+n_ctl    = len(ctl_grid)
+n_atl    = len(atl_grid)
+n_consec = len(consec_grid)
 
 # --- define action space ---
 # possible_distances_array = np.linspace(0, 42, 43)
 # possible_pace_array = np.linspace(4, 7, 19)
 # possible_elevations_array = np.linspace(0, 300, 7)
 
-possible_distances_array = np.linspace(0, 40, 10)
-possible_pace_array = np.linspace(4, 7, 6)
+possible_distances_array  = np.linspace(0, 18, 10)   # capped at data support
+possible_pace_array       = np.linspace(4, 7, 6)
 possible_elevations_array = np.linspace(0, 300, 3)
 
 action_array = np.array(list(product(possible_distances_array, possible_pace_array, possible_elevations_array)))
 
-#  -- init value fuinction and policy --
-V = np.full((n_ctl, n_atl), np.inf)
-policy = np.full((n_ctl, n_atl), None, dtype=object)
+# --- init value function and policy ---
+# V[i, j, k] = min days to goal from (ctl_grid[i], atl_grid[j], consec_grid[k])
+V      = np.full((n_ctl, n_atl, n_consec), np.inf)
+policy = np.full((n_ctl, n_atl, n_consec), None, dtype=object)
 
 # --- terminal condition ---
 for i, ctl in enumerate(ctl_grid):
     if ctl >= CTL_GOAL:
-        V[i, :] = 0
+        V[i, :, :] = 0
 
 
 print("Pre-computing TRIMP for all actions...")
@@ -52,72 +56,78 @@ for action in action_array:
         trimp_cache[tuple(action)] = mu_trimp
 feasible_actions = [(action, trimp) for action, trimp in trimp_cache.items()]
 print(f"  {len(feasible_actions)} feasible actions out of {len(action_array)}")
+joblib.dump(trimp_cache, "trimp_cache.pkl")
+
+# --- precompute next-state indices for all actions × all (CTL, ATL) states ---
+# trimp_vals[a] = TRIMP for feasible action a
+trimp_vals   = np.array([t for _, t in feasible_actions])   # (A,)
+action_list  = [a for a, _ in feasible_actions]             # list of tuples, length A
+
+# next CTL/ATL for every (state, action) combo — shape (n_ctl, A) and (n_atl, A)
+ctl_next_run = ctl_grid[:, None] + (trimp_vals[None, :] - ctl_grid[:, None]) * K_CTL  # (n_ctl, A)
+atl_next_run = atl_grid[:, None] + (trimp_vals[None, :] - atl_grid[:, None]) * K_ATL  # (n_atl, A)
+
+# clip and convert to grid indices (grids are integer steps so we can round directly)
+ctl_next_run_idx = np.clip(np.round(ctl_next_run - ctl_grid[0]).astype(int), 0, n_ctl - 1)
+atl_next_run_idx = np.clip(np.round(atl_next_run - atl_grid[0]).astype(int), 0, n_atl - 1)
+
+# ATL constraint masks — shape (n_atl, A): True means action is feasible from that ATL
+atl_next_run_vals = atl_next_run                                        # (n_atl, A)
+atl_ok            = (atl_next_run_vals <= atl_max)                      # absolute cap
+ramp_ok           = (atl_next_run_vals <= atl_grid[:, None] + 20)      # ramp constraint
+run_feasible      = atl_ok & ramp_ok                                    # (n_atl, A)
+
+# goal-reaching mask — shape (n_ctl, A): True means this action reaches CTL_GOAL
+reaches_goal = ctl_next_run >= CTL_GOAL                                 # (n_ctl, A)
+
+# precompute rest-day next indices (same for every iteration)
+ctl_rest = ctl_grid + (0 - ctl_grid) * K_CTL
+atl_rest = atl_grid + (0 - atl_grid) * K_ATL
+ctl_rest_idx = np.clip(np.round(ctl_rest - ctl_grid[0]).astype(int), 0, n_ctl - 1)
+atl_rest_idx = np.clip(np.round(atl_rest - atl_grid[0]).astype(int), 0, n_atl - 1)
 
 
 for iteration in range(T_max):
     V_prev = V.copy()
+
     for i, ctl in enumerate(ctl_grid):
         for j, atl in enumerate(atl_grid):
+            for k, consec in enumerate(consec_grid):
 
-            if ctl >= CTL_GOAL:
-                V[i, j] = 0
-                continue
+                if ctl >= CTL_GOAL:
+                    V[i, j, k] = 0
+                    continue
 
-            best_cost = np.inf
-            best_action = None
-            
-            # --- rest day ---
-            ctl_n = ctl + (0 - ctl) * K_CTL   # decays toward zero
-            atl_n = atl + (0 - atl) * K_ATL   # decays toward zero
-            
-            ctl_n = np.clip(ctl_n, ctl_grid[0], ctl_grid[-1])
-            atl_n = np.clip(atl_n, atl_grid[0], atl_grid[-1])
-
-            ctl_n_idx = np.argmin(np.abs(ctl_grid - ctl_n))
-            atl_n_idx = np.argmin(np.abs(atl_grid - atl_n))
-
-            cost = 1 + V_prev[ctl_n_idx, atl_n_idx]
-            if cost < best_cost:
-                best_cost = cost
+                # --- rest day ---
+                rest_cost   = 1 + V_prev[ctl_rest_idx[i], atl_rest_idx[j], 0]
+                best_cost   = rest_cost
                 best_action = "rest"
 
+                # --- run actions (blocked if at max consecutive runs) ---
+                if consec < MAX_CONSEC_RUNS:
+                    consec_n = consec + 1
+                    feasible_mask = run_feasible[j]                 # (A,)
 
-            # --- run actions ---
-            for action, mu_trimp in feasible_actions:
+                    # actions that reach the goal cost exactly 1
+                    goal_mask = reaches_goal[i] & feasible_mask     # (A,)
+                    if goal_mask.any():
+                        best_cost   = 1
+                        best_action = action_list[np.argmax(goal_mask)]
+                    else:
+                        # look up V_prev for all feasible non-goal actions at once
+                        nonfeasible = ~feasible_mask
+                        ci = ctl_next_run_idx[i]                    # (A,)
+                        ai = atl_next_run_idx[j]                    # (A,)
+                        costs = 1 + V_prev[ci, ai, consec_n]        # (A,)
+                        costs[nonfeasible] = np.inf
+                        best_a = int(np.argmin(costs))
+                        if costs[best_a] < best_cost:
+                            best_cost   = costs[best_a]
+                            best_action = action_list[best_a]
 
-                ctl_n = ctl + (mu_trimp - ctl) * K_CTL
-                atl_n = atl + (mu_trimp - atl) * K_ATL
+                V[i, j, k]      = best_cost
+                policy[i, j, k] = best_action
 
-                if atl_n > atl_max:
-                    continue
-
-                # ramp constraint — ATL proxy for weekly load increase
-                if atl_n > atl + 20:
-                    continue
-
-                if ctl_n >= CTL_GOAL:
-                    cost = 1
-                    if cost < best_cost:
-                        best_cost = cost
-                        best_action = action
-                    continue
-
-
-                ctl_n = np.clip(ctl_n, ctl_grid[0], ctl_grid[-1])
-                atl_n = np.clip(atl_n, atl_grid[0], atl_grid[-1])
-
-                ctl_n_idx = np.argmin(np.abs(ctl_grid - ctl_n))
-                atl_n_idx = np.argmin(np.abs(atl_grid - atl_n))
-
-                cost = 1 + V_prev[ctl_n_idx, atl_n_idx]
-                if cost < best_cost:
-                    best_cost = cost
-                    best_action = action
-
-            V[i, j] = best_cost
-            policy[i, j] = best_action
-
-    # check convergence
     changed = np.sum(V != V_prev)
     print(f"Iteration {iteration+1}: {changed} states updated")
 
@@ -126,8 +136,11 @@ for iteration in range(T_max):
         break
 
 print(f"All done!")
-print(f"V found, V = {V}")
-print(f"Best policy found, policy = {policy}")
+np.save("V.npy", V)
+np.save("policy.npy", policy, allow_pickle=True)
+print("Saved V.npy, policy.npy, trimp_cache.pkl")
+
+
 
 
 # for t in range(T_max, 0, -1):          # backward in time
