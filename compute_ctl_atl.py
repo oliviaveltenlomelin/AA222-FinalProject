@@ -35,6 +35,7 @@ def load_runs(path: str) -> pd.DataFrame:
     runs = runs[runs["Average Heart Rate"].notna()].reset_index(drop=True)
     print(f"Loaded {before} run activities, kept {len(runs)} with HR data  "
           f"({runs['date'].min().date()} → {runs['date'].max().date()})")
+    
     return runs
 
 
@@ -43,32 +44,18 @@ def load_runs(path: str) -> pd.DataFrame:
 # ==============================================================================
 
 def compute_trimp(runs: pd.DataFrame) -> pd.Series:
-    """
-    Return a Series of TRIMP values aligned to runs.index.
+    HR_REST = 45.0   # reasonable for a D1 runner
+    HR_MAX  = 195.0  # adjust if you know her actual max
 
-    Priority:
-      1. Strava Relative Effort  (HR-zone weighted, best option)
-      2. Banister proxy: (moving_time_min) × (avg_hr / 100)
-      3. Distance proxy: distance_km  (no HR data at all)
-    """
-    trimp = runs["Relative Effort"].copy()
+    duration_min = runs["Moving Time"] / 60.0
+    hrr = (runs["Average Heart Rate"] - HR_REST) / (HR_MAX - HR_REST)
+    hrr = hrr.clip(0.0, 1.0)
 
-    # Fallback 2: Banister proxy
-    mask2 = trimp.isna() & runs["Average Heart Rate"].notna()
-    trimp.loc[mask2] = (
-        (runs.loc[mask2, "Moving Time"] / 60.0)   # seconds → minutes
-        * (runs.loc[mask2, "Average Heart Rate"] / 100.0)
-    )
+    trimp = duration_min * hrr * 0.64 * np.exp(1.92 * hrr)
 
-    # Fallback 3: distance proxy
-    mask3 = trimp.isna()
-    trimp.loc[mask3] = runs.loc[mask3, "Distance.1"] / 1000.0  # m → km
-
-    n_re  = runs["Relative Effort"].notna().sum()
-    n_ban = mask2.sum()
-    n_dst = mask3.sum()
-    print(f"TRIMP sources — Relative Effort: {n_re}, "
-          f"Banister proxy: {n_ban}, Distance proxy: {n_dst}")
+    # Fallback: distance proxy (meters → km) only when HR missing
+    mask = trimp.isna() | runs["Average Heart Rate"].isna()
+    trimp.loc[mask] = runs.loc[mask, "Distance.1"] / 1000.0
 
     return trimp.fillna(0.0)
 
@@ -185,6 +172,7 @@ def build_feature_df(runs: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
 
 if __name__ == "__main__":
     runs  = load_runs(CSV_PATH)
+
     daily = compute_ctl_atl(runs)
 
     # Attach trimp back onto runs before building features

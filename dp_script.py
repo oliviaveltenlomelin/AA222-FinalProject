@@ -12,40 +12,46 @@ gpr, x_scaler, y_scaler = train_surrogate()
 # --- constants ---
 K_CTL = 1 - np.exp(-1 / 42)
 K_ATL = 1 - np.exp(-1 / 7)
-CTL_GOAL = 45
+CTL_GOAL = 60
 atl_max = 75
 T_max = 140
 MAX_CONSEC_RUNS = 2   # force rest after this many consecutive run days
-
-# --- define grids ---
-ctl_grid    = np.arange(10, 56, 1)   # up to CTL_GOAL + buffer
-atl_grid    = np.arange(5,  76, 1)
-consec_grid = np.arange(0, MAX_CONSEC_RUNS + 1)  # 0, 1, 2
-
-n_ctl    = len(ctl_grid)
-n_atl    = len(atl_grid)
-n_consec = len(consec_grid)
+DIST_RAMP   = 3.0     # max km a run may exceed the recent earned distance ceiling
+DMAX_SEED   = 5.0     # day-1 ceiling (first run capped at DMAX_SEED + DIST_RAMP)
 
 # --- define action space ---
 # possible_distances_array = np.linspace(0, 42, 43)
 # possible_pace_array = np.linspace(4, 7, 19)
 # possible_elevations_array = np.linspace(0, 300, 7)
 
-possible_distances_array  = np.linspace(0, 18, 10)   # capped at data support
+possible_distances_array  = np.linspace(2, 42, 19)   # capped at data support
 possible_pace_array       = np.linspace(4, 7, 6)
-possible_elevations_array = np.linspace(0, 300, 3)
+possible_elevations_array = np.linspace(0, 300, 6)
 
 action_array = np.array(list(product(possible_distances_array, possible_pace_array, possible_elevations_array)))
 
+# --- define grids ---
+ctl_grid    = np.arange(10, 65, 1)   # up to CTL_GOAL + buffer
+atl_grid    = np.arange(5,  76, 1)
+consec_grid = np.arange(0, MAX_CONSEC_RUNS + 1)  # 0, 1, 2
+# earned distance ceiling: the longest run done so far (seed .. max action distance).
+# the grid points are the achievable distances themselves, so a run always lands on one.
+dmax_grid   = np.unique(np.concatenate(([DMAX_SEED], possible_distances_array)))
+
+n_ctl    = len(ctl_grid)
+n_atl    = len(atl_grid)
+n_consec = len(consec_grid)
+n_dmax   = len(dmax_grid)
+
 # --- init value function and policy ---
-# V[i, j, k] = min days to goal from (ctl_grid[i], atl_grid[j], consec_grid[k])
-V      = np.full((n_ctl, n_atl, n_consec), np.inf)
-policy = np.full((n_ctl, n_atl, n_consec), None, dtype=object)
+# V[i, j, k, l] = min days to goal from (ctl_grid[i], atl_grid[j], consec_grid[k], dmax_grid[l])
+V      = np.full((n_ctl, n_atl, n_consec, n_dmax), np.inf)
+policy = np.full((n_ctl, n_atl, n_consec, n_dmax), None, dtype=object)
 
 # --- terminal condition ---
 for i, ctl in enumerate(ctl_grid):
     if ctl >= CTL_GOAL:
-        V[i, :, :] = 0
+        V[i, :, :, :] = 0
 
 
 print("Pre-computing TRIMP for all actions...")
@@ -62,6 +68,17 @@ joblib.dump(trimp_cache, "trimp_cache.pkl")
 # trimp_vals[a] = TRIMP for feasible action a
 trimp_vals   = np.array([t for _, t in feasible_actions])   # (A,)
 action_list  = [a for a, _ in feasible_actions]             # list of tuples, length A
+action_dist  = np.array([a[0] for a in action_list])        # (A,) distance (km) of each action
+
+# distance-ramp constraint — shape (n_dmax, A): True if action's distance is within
+# DIST_RAMP km of the current earned ceiling.
+dist_ok = (action_dist[None, :] <= dmax_grid[:, None] + DIST_RAMP)      # (n_dmax, A)
+
+# next earned ceiling for every (ceiling, action): max(current ceiling, run distance).
+# every run distance is itself a dmax_grid point, so searchsorted gives an exact index.
+dmax_after_run   = np.maximum(dmax_grid[:, None], action_dist[None, :])  # (n_dmax, A)
+dmax_next_run_idx = np.searchsorted(dmax_grid, dmax_after_run)           # (n_dmax, A)
+dmax_next_run_idx = np.clip(dmax_next_run_idx, 0, n_dmax - 1)
 
 # next CTL/ATL for every (state, action) combo — shape (n_ctl, A) and (n_atl, A)
 ctl_next_run = ctl_grid[:, None] + (trimp_vals[None, :] - ctl_grid[:, None]) * K_CTL  # (n_ctl, A)
@@ -74,7 +91,7 @@ atl_next_run_idx = np.clip(np.round(atl_next_run - atl_grid[0]).astype(int), 0, 
 # ATL constraint masks — shape (n_atl, A): True means action is feasible from that ATL
 atl_next_run_vals = atl_next_run                                        # (n_atl, A)
 atl_ok            = (atl_next_run_vals <= atl_max)                      # absolute cap
-ramp_ok           = (atl_next_run_vals <= atl_grid[:, None] + 20)      # ramp constraint
+ramp_ok           = (atl_next_run_vals <= atl_grid[:, None] + 8)        # ramp constraint (max +8 ATL/day)
 run_feasible      = atl_ok & ramp_ok                                    # (n_atl, A)
 
 # goal-reaching mask — shape (n_ctl, A): True means this action reaches CTL_GOAL
@@ -93,40 +110,43 @@ for iteration in range(T_max):
     for i, ctl in enumerate(ctl_grid):
         for j, atl in enumerate(atl_grid):
             for k, consec in enumerate(consec_grid):
+                for l, dmax in enumerate(dmax_grid):
 
-                if ctl >= CTL_GOAL:
-                    V[i, j, k] = 0
-                    continue
+                    if ctl >= CTL_GOAL:
+                        V[i, j, k, l] = 0
+                        continue
 
-                # --- rest day ---
-                rest_cost   = 1 + V_prev[ctl_rest_idx[i], atl_rest_idx[j], 0]
-                best_cost   = rest_cost
-                best_action = "rest"
+                    # --- rest day --- (earned ceiling l is monotonic, so it carries over)
+                    rest_cost   = 1 + V_prev[ctl_rest_idx[i], atl_rest_idx[j], 0, l]
+                    best_cost   = rest_cost
+                    best_action = "rest"
 
-                # --- run actions (blocked if at max consecutive runs) ---
-                if consec < MAX_CONSEC_RUNS:
-                    consec_n = consec + 1
-                    feasible_mask = run_feasible[j]                 # (A,)
+                    # --- run actions (blocked if at max consecutive runs) ---
+                    if consec < MAX_CONSEC_RUNS:
+                        consec_n = consec + 1
+                        # feasible = ATL ramp ok AND distance within DIST_RAMP of ceiling
+                        feasible_mask = run_feasible[j] & dist_ok[l]    # (A,)
 
-                    # actions that reach the goal cost exactly 1
-                    goal_mask = reaches_goal[i] & feasible_mask     # (A,)
-                    if goal_mask.any():
-                        best_cost   = 1
-                        best_action = action_list[np.argmax(goal_mask)]
-                    else:
-                        # look up V_prev for all feasible non-goal actions at once
-                        nonfeasible = ~feasible_mask
-                        ci = ctl_next_run_idx[i]                    # (A,)
-                        ai = atl_next_run_idx[j]                    # (A,)
-                        costs = 1 + V_prev[ci, ai, consec_n]        # (A,)
-                        costs[nonfeasible] = np.inf
-                        best_a = int(np.argmin(costs))
-                        if costs[best_a] < best_cost:
-                            best_cost   = costs[best_a]
-                            best_action = action_list[best_a]
+                        # actions that reach the goal cost exactly 1
+                        goal_mask = reaches_goal[i] & feasible_mask     # (A,)
+                        if goal_mask.any():
+                            best_cost   = 1
+                            best_action = action_list[np.argmax(goal_mask)]
+                        else:
+                            # look up V_prev for all feasible non-goal actions at once
+                            nonfeasible = ~feasible_mask
+                            ci = ctl_next_run_idx[i]                    # (A,)
+                            ai = atl_next_run_idx[j]                    # (A,)
+                            di = dmax_next_run_idx[l]                   # (A,)
+                            costs = 1 + V_prev[ci, ai, consec_n, di]    # (A,)
+                            costs[nonfeasible] = np.inf
+                            best_a = int(np.argmin(costs))
+                            if costs[best_a] < best_cost:
+                                best_cost   = costs[best_a]
+                                best_action = action_list[best_a]
 
-                V[i, j, k]      = best_cost
-                policy[i, j, k] = best_action
+                    V[i, j, k, l]      = best_cost
+                    policy[i, j, k, l] = best_action
 
     changed = np.sum(V != V_prev)
     print(f"Iteration {iteration+1}: {changed} states updated")
@@ -138,7 +158,8 @@ for iteration in range(T_max):
 print(f"All done!")
 np.save("V.npy", V)
 np.save("policy.npy", policy, allow_pickle=True)
-print("Saved V.npy, policy.npy, trimp_cache.pkl")
+np.save("dmax_grid.npy", dmax_grid)
+print("Saved V.npy, policy.npy, dmax_grid.npy, trimp_cache.pkl")
 
 
 
