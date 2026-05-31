@@ -20,11 +20,7 @@ DIST_RAMP   = 3.0     # max km a run may exceed the recent earned distance ceili
 DMAX_SEED   = 5.0     # day-1 ceiling (first run capped at DMAX_SEED + DIST_RAMP)
 
 # --- define action space ---
-# possible_distances_array = np.linspace(0, 42, 43)
-# possible_pace_array = np.linspace(4, 7, 19)
-# possible_elevations_array = np.linspace(0, 300, 7)
-
-possible_distances_array  = np.linspace(2, 42, 19)   # capped at data support
+possible_distances_array  = np.linspace(2, 42, 1)   # capped at data support
 possible_pace_array       = np.linspace(4, 7, 6)
 possible_elevations_array = np.linspace(0, 300, 6)
 
