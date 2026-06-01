@@ -20,8 +20,8 @@ policy      = np.load("policy.npy", allow_pickle=True)
 trimp_cache = joblib.load("trimp_cache.pkl")
 
 # --- set your starting fitness here ---
-ctl_start = 13.0
-atl_start = 13.0
+ctl_start = 15.0
+atl_start = 15.0
 
 # --- rollout ---
 ctl, atl, consec = ctl_start, atl_start, 0
